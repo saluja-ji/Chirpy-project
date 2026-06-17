@@ -8,3 +8,9 @@ CREATE TABLE users (
 
 -- +goose Down
 DROP TABLE users;
+
+-- name: UpgradeUserToChirpyRed :one
+UPDATE users
+SET is_chirpy_red = TRUE
+WHERE id = $1
+RETURNING *;
