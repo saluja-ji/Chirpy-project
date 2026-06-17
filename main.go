@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chirpy/internal/auth"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -20,7 +21,8 @@ import (
 )
 
 type UserRequest struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type UserResponse struct {
@@ -61,6 +63,56 @@ type CleanedResponse struct {
 	CleanedBody string `json:"cleaned_body"`
 }
 
+func (cfg *apiConfig) handlerLogin(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	var req UserRequest
+
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(
+		r.Context(),
+		req.Email,
+	)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Incorrect email or password",
+		)
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(
+		req.Password,
+		user.HashedPassword,
+	)
+
+	if err != nil || !match {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Incorrect email or password",
+		)
+		return
+	}
+
+	resp := UserResponse{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
 func (cfg *apiConfig) handlerCreateUser(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -73,11 +125,19 @@ func (cfg *apiConfig) handlerCreateUser(
 		return
 	}
 
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	user, err := cfg.dbQueries.CreateUser(
 		r.Context(),
-		req.Email,
+		database.CreateUserParams{
+			Email:          req.Email,
+			HashedPassword: hashedPassword,
+		},
 	)
-
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -311,6 +371,7 @@ func main() {
 
 	})
 	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handlerGetChirp)
+	mux.HandleFunc("/api/login", apiCfg.handlerLogin)
 
 	// Admin endpoints
 	mux.HandleFunc("/admin/metrics", apiCfg.handlerMetrics)
