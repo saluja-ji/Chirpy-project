@@ -1,6 +1,6 @@
 # Chirpy
 
-A Twitter-like social media backend built in Go as part of the Boot.dev Backend Development course.
+A Twitter-like social media backend built in Go 
 
 The goal of this project is to learn backend engineering concepts by building a real web application from scratch using:
 
