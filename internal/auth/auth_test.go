@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -100,5 +101,26 @@ func TestJWTExpired(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected expired token error")
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(
+		"Authorization",
+		"Bearer test-token",
+	)
+
+	token, err := GetBearerToken(headers)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if token != "test-token" {
+		t.Fatalf(
+			"expected test-token got %s",
+			token,
+		)
 	}
 }

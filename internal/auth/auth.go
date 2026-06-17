@@ -3,6 +3,9 @@ package auth
 import (
 	"time"
 
+	"crypto/rand"
+	"encoding/hex"
+
 	"github.com/alexedwards/argon2id"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -72,4 +75,12 @@ func ValidateJWT(
 		return uuid.Nil, err
 	}
 	return userID, nil
+}
+
+func MakeRefreshToken() string {
+	b := make([]byte, 32)
+
+	rand.Read(b)
+
+	return hex.EncodeToString(b)
 }

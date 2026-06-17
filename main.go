@@ -25,6 +25,19 @@ type UserRequest struct {
 	Password string `json:"password"`
 }
 
+type LoginResponse struct {
+	ID           string `json:"id"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	Email        string `json:"email"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type RefreshResponse struct {
+	Token string `json:"token"`
+}
+
 type UserResponse struct {
 	ID        string `json:"id"`
 	CreatedAt string `json:"created_at"`
@@ -33,8 +46,7 @@ type UserResponse struct {
 }
 
 type CreateChirpRequest struct {
-	Body   string `json:"body"`
-	UserID string `json:"user_id"`
+	Body string `json:"body"`
 }
 
 type ChirpResponse struct {
@@ -49,6 +61,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecrets     string
 }
 
 type Chirp struct {
@@ -103,11 +116,48 @@ func (cfg *apiConfig) handlerLogin(
 		return
 	}
 
-	resp := UserResponse{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
-		Email:     user.Email,
+	token, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecrets,
+		time.Hour,
+	)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create token",
+		)
+		return
+	}
+
+	RefreshToken := auth.MakeRefreshToken()
+
+	_, err = cfg.dbQueries.CreateRefreshToken(
+		r.Context(),
+		database.CreateRefreshTokenParams{
+			Token:     RefreshToken,
+			UserID:    user.ID,
+			ExpiresAt: time.Now().UTC().Add(60 * 24 * time.Hour),
+		},
+	)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create refresh token",
+		)
+		return
+	}
+
+	resp := LoginResponse{
+		ID:           user.ID.String(),
+		CreatedAt:    user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:    user.UpdatedAt.Format(time.RFC3339),
+		Email:        user.Email,
+		Token:        token,
+		RefreshToken: RefreshToken,
 	}
 
 	respondWithJSON(w, http.StatusOK, resp)
@@ -215,6 +265,31 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
+	tokenString, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Unauthorized",
+		)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(
+		tokenString,
+		cfg.jwtSecrets,
+	)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Unauthorized",
+		)
+		return
+	}
+
 	if len(req.Body) > 140 {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
@@ -230,12 +305,6 @@ func (cfg *apiConfig) handlerCreateChirp(
 	}
 
 	cleanedBody := strings.Join(words, " ")
-
-	userID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid user ID")
-		return
-	}
 
 	chirp, err := cfg.dbQueries.CreateChirp(
 		r.Context(),
@@ -332,8 +401,81 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	}
 	respondWithJSON(w, http.StatusOK, resp)
 }
+
+func (cfg *apiConfig) handlerRefresh(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+
+	refreshToken, err := auth.GetBearerToken(
+		r.Header,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserFromRefreshToken(
+		r.Context(),
+		refreshToken,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	token, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecrets,
+		time.Hour,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	respondWithJSON(
+		w,
+		http.StatusOK,
+		RefreshResponse{
+			Token: token,
+		},
+	)
+}
+
+func (cfg *apiConfig) handlerRevoke(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+
+	refreshToken, err := auth.GetBearerToken(
+		r.Header,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(
+		r.Context(),
+		refreshToken,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	err := godotenv.Load()
+	jwtSecrets := os.Getenv("JWT_SECRET")
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
@@ -350,8 +492,9 @@ func main() {
 	platform := os.Getenv("PLATFORM")
 
 	apiCfg := &apiConfig{
-		dbQueries: dbQueries,
-		platform:  platform,
+		dbQueries:  dbQueries,
+		platform:   platform,
+		jwtSecrets: jwtSecrets,
 	}
 
 	mux := http.NewServeMux()
@@ -372,6 +515,10 @@ func main() {
 	})
 	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handlerGetChirp)
 	mux.HandleFunc("/api/login", apiCfg.handlerLogin)
+
+	mux.HandleFunc("/api/refresh", apiCfg.handlerRefresh)
+
+	mux.HandleFunc("/api/revoke", apiCfg.handlerRevoke)
 
 	// Admin endpoints
 	mux.HandleFunc("/admin/metrics", apiCfg.handlerMetrics)
